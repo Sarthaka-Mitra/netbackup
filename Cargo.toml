@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio={version ="1", features=["full"] }
+sha2="0.10"
 
 [[bin]]
 name="server"
