@@ -1,21 +1,27 @@
 mod protocol;
 mod storage;
 
-use protocol::{Message, Operation};
+use protocol::{Message, Operation, StatusCode, generate_auth_token};
 use std::error::Error;
 use std::sync::Arc;
 use storage::Storage;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+// Server configuration
+const SERVER_PASSWORD: &str = "secure_password_123"; // In production, load from config file
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    //Initialise storage
+    // Initialize storage
     let storage = Arc::new(Storage::new("./storage_data")?);
     println!("Storage initialized at: ./storage_data");
 
+    let auth_token = generate_auth_token(SERVER_PASSWORD);
+    println!("Server auth token configured");
+
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    println!("Server listening to 127.0.0.1:8080");
+    println!("Server listening on 127.0.0.1:8080\n");
 
     loop {
         let (socket, addr) = listener.accept().await?;
@@ -23,21 +29,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let storage = Arc::clone(&storage);
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, storage).await {
+            if let Err(e) = handle_client(socket, storage, auth_token).await {
                 eprintln!("Error handling client: {}", e);
             }
         });
     }
 }
 
-async fn handle_client(mut socket: TcpStream, storage: Arc<Storage>) -> Result<(), Box<dyn Error>> {
+async fn handle_client(
+    mut socket: TcpStream,
+    storage: Arc<Storage>,
+    expected_token: [u8; 32],
+) -> Result<(), Box<dyn Error>> {
+    let mut authenticated = false;
+    let mut request_counter = 0u32;
+
     loop {
         // Read length prefix (4 bytes)
         let mut len_bytes = [0u8; 4];
         match socket.read_exact(&mut len_bytes).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                println!("Client disconnected");
+                println!("Client disconnected\n");
                 return Ok(());
             }
             Err(e) => return Err(e.into()),
@@ -50,25 +63,94 @@ async fn handle_client(mut socket: TcpStream, storage: Arc<Storage>) -> Result<(
         socket.read_exact(&mut data).await?;
 
         // Parse message
-        let message = Message::from_bytes(length, &data)?;
+        let message = match Message::from_bytes(length, &data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("Failed to parse message: {}", e);
+                let error_response = Message::new_response(
+                    request_counter,
+                    Operation::Store, // Doesn't matter which operation
+                    StatusCode::ErrorInvalidData,
+                    b"Invalid message format".to_vec(),
+                );
+                socket.write_all(&error_response.to_bytes()).await?;
+                continue;
+            }
+        };
+
+        request_counter += 1;
+
+        // Check authentication (except for Auth operation itself)
+        if message.operation != Operation::Auth {
+            if !authenticated {
+                let response = Message::new_response(
+                    message.request_id,
+                    message.operation,
+                    StatusCode::ErrorPermissionDenied,
+                    b"Authentication required".to_vec(),
+                );
+                socket.write_all(&response.to_bytes()).await?;
+                continue;
+            }
+
+            // Verify token on every request
+            if message.auth_token != expected_token {
+                let response = Message::new_response(
+                    message.request_id,
+                    message.operation,
+                    StatusCode::ErrorPermissionDenied,
+                    b"Invalid authentication token".to_vec(),
+                );
+                socket.write_all(&response.to_bytes()).await?;
+                continue;
+            }
+        }
 
         // Handle operation
-        let response = handle_operation(message, &storage)?;
+        let response = if message.operation == Operation::Auth {
+            // Handle authentication
+            if message.auth_token == expected_token {
+                authenticated = true;
+                println!("✓ Client authenticated");
+                Message::new_response(
+                    message.request_id,
+                    Operation::Auth,
+                    StatusCode::Success,
+                    b"Authenticated".to_vec(),
+                )
+            } else {
+                println!("✗ Authentication failed");
+                Message::new_response(
+                    message.request_id,
+                    Operation::Auth,
+                    StatusCode::ErrorPermissionDenied,
+                    b"Invalid password".to_vec(),
+                )
+            }
+        } else {
+            handle_storage_operation(message, &storage)
+        };
 
         // Send response
         socket.write_all(&response.to_bytes()).await?;
     }
 }
 
-fn handle_operation(message: Message, storage: &Storage) -> Result<Message, Box<dyn Error>> {
+fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
     match message.operation {
         Operation::Store => {
             // Payload format: filename + null byte + file data
-            let null_pos = message
-                .payload
-                .iter()
-                .position(|&b| b == 0)
-                .ok_or("Invalid STORE payload: missing null separator")?;
+            let null_pos = match message.payload.iter().position(|&b| b == 0) {
+                Some(pos) => pos,
+                None => {
+                    return Message::new_response(
+                        message.request_id,
+                        Operation::Store,
+                        StatusCode::ErrorInvalidData,
+                        b"Invalid STORE payload".to_vec(),
+                    );
+                }
+            };
 
             let filename = String::from_utf8_lossy(&message.payload[..null_pos]).to_string();
             let file_data = &message.payload[null_pos + 1..];
@@ -76,67 +158,119 @@ fn handle_operation(message: Message, storage: &Storage) -> Result<Message, Box<
             match storage.store(&filename, file_data) {
                 Ok(_) => {
                     println!("✓ STORE: {} ({} bytes)", filename, file_data.len());
-                    Ok(Message::new(Operation::Store, b"OK".to_vec()))
-                }
-                Err(e) => {
-                    eprintln!("✗ STORE failed: {}", e);
-                    Ok(Message::new(
+                    Message::new_response(
+                        message.request_id,
                         Operation::Store,
-                        format!("ERROR: {}", e).into_bytes(),
-                    ))
+                        StatusCode::Success,
+                        b"OK".to_vec(),
+                    )
+                }
+                Err(_) => {
+                    eprintln!("✗ STORE failed");
+                    Message::new_response(
+                        message.request_id,
+                        Operation::Store,
+                        StatusCode::ErrorServerError,
+                        b"Storage failed".to_vec(),
+                    )
                 }
             }
         }
-
         Operation::Retrieve => {
             let filename = String::from_utf8_lossy(&message.payload).to_string();
 
             match storage.retrieve(&filename) {
                 Ok(data) => {
-                    println!("RETRIEVE: {} ({} bytes)", filename, data.len());
-                    Ok(Message::new(Operation::Retrieve, data))
-                }
-                Err(e) => {
-                    eprintln!("RETRIEVE failed: {}", e);
-                    Ok(Message::new(
+                    println!("✓ RETRIEVE: {} ({} bytes)", filename, data.len());
+                    Message::new_response(
+                        message.request_id,
                         Operation::Retrieve,
-                        format!("ERROR: {}", e).into_bytes(),
-                    ))
+                        StatusCode::Success,
+                        data,
+                    )
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("✗ RETRIEVE failed: File not found");
+                    Message::new_response(
+                        message.request_id,
+                        Operation::Retrieve,
+                        StatusCode::ErrorNotFound,
+                        b"File not found".to_vec(),
+                    )
+                }
+                Err(_) => {
+                    eprintln!("✗ RETRIEVE failed");
+                    Message::new_response(
+                        message.request_id,
+                        Operation::Retrieve,
+                        StatusCode::ErrorServerError,
+                        b"Retrieval failed".to_vec(),
+                    )
                 }
             }
         }
-
         Operation::Delete => {
             let filename = String::from_utf8_lossy(&message.payload).to_string();
 
             match storage.delete(&filename) {
                 Ok(_) => {
                     println!("✓ DELETE: {}", filename);
-                    Ok(Message::new(Operation::Delete, b"OK".to_vec()))
-                }
-                Err(e) => {
-                    eprintln!("DELETE failed: {}", e);
-                    Ok(Message::new(
+                    Message::new_response(
+                        message.request_id,
                         Operation::Delete,
-                        format!("ERROR: {}", e).into_bytes(),
-                    ))
+                        StatusCode::Success,
+                        b"OK".to_vec(),
+                    )
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("✗ DELETE failed: File not found");
+                    Message::new_response(
+                        message.request_id,
+                        Operation::Delete,
+                        StatusCode::ErrorNotFound,
+                        b"File not found".to_vec(),
+                    )
+                }
+                Err(_) => {
+                    eprintln!("✗ DELETE failed");
+                    Message::new_response(
+                        message.request_id,
+                        Operation::Delete,
+                        StatusCode::ErrorServerError,
+                        b"Deletion failed".to_vec(),
+                    )
                 }
             }
         }
-
         Operation::List => match storage.list() {
             Ok(files) => {
                 let file_list = files.join("\n");
                 println!("✓ LIST: {} files", files.len());
-                Ok(Message::new(Operation::List, file_list.into_bytes()))
-            }
-            Err(e) => {
-                eprintln!("✗ LIST failed: {}", e);
-                Ok(Message::new(
+                Message::new_response(
+                    message.request_id,
                     Operation::List,
-                    format!("ERROR: {}", e).into_bytes(),
-                ))
+                    StatusCode::Success,
+                    file_list.into_bytes(),
+                )
+            }
+            Err(_) => {
+                eprintln!("✗ LIST failed");
+                Message::new_response(
+                    message.request_id,
+                    Operation::List,
+                    StatusCode::ErrorServerError,
+                    b"List failed".to_vec(),
+                )
             }
         },
+        Operation::Auth => {
+            // Should not reach here as auth is handled separately
+            Message::new_response(
+                message.request_id,
+                Operation::Auth,
+                StatusCode::ErrorServerError,
+                b"Unexpected auth operation".to_vec(),
+            )
+        }
     }
 }

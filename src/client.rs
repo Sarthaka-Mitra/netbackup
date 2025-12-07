@@ -1,9 +1,11 @@
 mod protocol;
 
-use protocol::{Message, Operation};
+use protocol::{Message, Operation, StatusCode, generate_auth_token};
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+const SERVER_PASSWORD: &str = "secure_password_123";
 
 async fn send_message(stream: &mut TcpStream, message: &Message) -> Result<(), Box<dyn Error>> {
     let bytes = message.to_bytes();
@@ -28,26 +30,54 @@ async fn receive_message(stream: &mut TcpStream) -> Result<Message, Box<dyn Erro
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
-    println!("Connected to server");
+    println!("Connected to server\n");
 
-    // Test 1: Store a file
+    let auth_token = generate_auth_token(SERVER_PASSWORD);
+    let mut request_id = 1u32;
+
+    // Step 1: Authenticate
+    println!("=== Authenticating ===");
+    let mut auth_msg = Message::new_with_auth(Operation::Auth, Vec::new(), auth_token);
+    auth_msg.set_request_id(request_id);
+    request_id += 1;
+
+    send_message(&mut stream, &auth_msg).await?;
+    let response = receive_message(&mut stream).await?;
+
+    if response.status == StatusCode::Success {
+        println!("✓ Authenticated successfully\n");
+    } else {
+        println!(
+            "✗ Authentication failed: {}\n",
+            String::from_utf8_lossy(&response.payload)
+        );
+        return Ok(());
+    }
+
+    // Step 2: Store a file
     println!("=== Test 1: STORE ===");
     let filename = "hello.txt";
     let file_content = b"Hello from the client! This is test data.";
 
-    // Create payload: filename + null byte + data
     let mut payload = filename.as_bytes().to_vec();
     payload.push(0);
     payload.extend_from_slice(file_content);
 
-    let store_msg = Message::new(Operation::Store, payload);
+    let mut store_msg = Message::new_with_auth(Operation::Store, payload, auth_token);
+    store_msg.set_request_id(request_id);
+    request_id += 1;
+
     send_message(&mut stream, &store_msg).await?;
     let response = receive_message(&mut stream).await?;
+    println!("Status: {:?}", response.status);
     println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
 
-    // Test 2: List files
+    // Step 3: List files
     println!("=== Test 2: LIST ===");
-    let list_msg = Message::new(Operation::List, Vec::new());
+    let mut list_msg = Message::new_with_auth(Operation::List, Vec::new(), auth_token);
+    list_msg.set_request_id(request_id);
+    request_id += 1;
+
     send_message(&mut stream, &list_msg).await?;
     let response = receive_message(&mut stream).await?;
     println!(
@@ -55,63 +85,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
         String::from_utf8_lossy(&response.payload)
     );
 
-    // Test 3: Retrieve the file
+    // Step 4: Retrieve the file
     println!("=== Test 3: RETRIEVE ===");
-    let retrieve_msg = Message::new(Operation::Retrieve, filename.as_bytes().to_vec());
+    let mut retrieve_msg = Message::new_with_auth(
+        Operation::Retrieve,
+        filename.as_bytes().to_vec(),
+        auth_token,
+    );
+    retrieve_msg.set_request_id(request_id);
+    request_id += 1;
+
     send_message(&mut stream, &retrieve_msg).await?;
     let response = receive_message(&mut stream).await?;
+    println!("Status: {:?}", response.status);
     println!(
         "Retrieved content: {}\n",
         String::from_utf8_lossy(&response.payload)
     );
 
-    // Test 4: Store another file
-    println!("=== Test 4: STORE another file ===");
-    let filename2 = "data.txt";
-    let content2 = b"More test data here! touching the file so that i can see i have edited the text and stuff";
+    // Step 5: Try invalid auth (should fail)
+    println!("=== Test 4: Invalid Auth Token (should fail) ===");
+    let bad_token = [0u8; 32]; // Wrong token
+    let mut bad_msg = Message::new_with_auth(Operation::List, Vec::new(), bad_token);
+    bad_msg.set_request_id(request_id);
+    request_id += 1;
 
-    let mut payload2 = filename2.as_bytes().to_vec();
-    payload2.push(0);
-    payload2.extend_from_slice(content2);
-
-    let store_msg2 = Message::new(Operation::Store, payload2);
-    send_message(&mut stream, &store_msg2).await?;
+    send_message(&mut stream, &bad_msg).await?;
     let response = receive_message(&mut stream).await?;
+    println!("Status: {:?}", response.status);
     println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
 
-    // Test 5: List again
-    println!("=== Test 5: LIST (should show 2 files) ===");
-    let list_msg = Message::new(Operation::List, Vec::new());
-    send_message(&mut stream, &list_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!(
-        "Files on server:\n{}\n",
-        String::from_utf8_lossy(&response.payload)
-    );
+    // Step 6: Delete a file
+    println!("=== Test 5: DELETE ===");
+    let mut delete_msg =
+        Message::new_with_auth(Operation::Delete, filename.as_bytes().to_vec(), auth_token);
+    delete_msg.set_request_id(request_id);
+    request_id += 1;
 
-    // Test 6: Delete a file
-    // println!("=== Test 6: DELETE ===");
-    // let delete_msg = Message::new(Operation::Delete, filename.as_bytes().to_vec());
-    // send_message(&mut stream, &delete_msg).await?;
-    // let response = receive_message(&mut stream).await?;
-    // println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
-    //
-    // // Test 7: List after delete
-    // println!("=== Test 7: LIST (should show 1 file) ===");
-    // let list_msg = Message::new(Operation::List, Vec::new());
-    // send_message(&mut stream, &list_msg).await?;
-    // let response = receive_message(&mut stream).await?;
-    // println!(
-    //     "Files on server:\n{}\n",
-    //     String::from_utf8_lossy(&response.payload)
-    // );
-    //
-    // // Test 8: Try to retrieve deleted file (should fail)
-    // println!("=== Test 8: RETRIEVE deleted file (should error) ===");
-    // let retrieve_msg = Message::new(Operation::Retrieve, filename.as_bytes().to_vec());
-    // send_message(&mut stream, &retrieve_msg).await?;
-    // let response = receive_message(&mut stream).await?;
-    // println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
+    send_message(&mut stream, &delete_msg).await?;
+    let response = receive_message(&mut stream).await?;
+    println!("Status: {:?}", response.status);
+    println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
+
+    // Step 7: Try to retrieve deleted file
+    println!("=== Test 6: RETRIEVE deleted file (should fail) ===");
+    let mut retrieve_msg = Message::new_with_auth(
+        Operation::Retrieve,
+        filename.as_bytes().to_vec(),
+        auth_token,
+    );
+    retrieve_msg.set_request_id(request_id);
+
+    send_message(&mut stream, &retrieve_msg).await?;
+    let response = receive_message(&mut stream).await?;
+    println!("Status: {:?}", response.status);
+    println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
 
     Ok(())
 }
