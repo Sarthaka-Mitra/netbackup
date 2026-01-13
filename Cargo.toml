@@ -18,3 +18,7 @@ path="src/client.rs"
 [[bin]]
 name="chunked"
 path="src/chunked_client.rs"
+
+[[bin]]
+name="concurrent"
+path="src/concurrent_test.rs"

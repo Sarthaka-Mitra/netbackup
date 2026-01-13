@@ -1,12 +1,14 @@
 mod protocol;
 
 use protocol::{CHUNK_SIZE, ChunkMetadata, Message, Operation, StatusCode, generate_auth_token};
+use std::env;
 use std::error::Error;
 use std::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 const SERVER_PASSWORD: &str = "secure_password_123";
+const DEFAULT_SERVER: &str = "127.0.0.1:8080";
 
 async fn send_message(stream: &mut TcpStream, message: &Message) -> Result<(), Box<dyn Error>> {
     let bytes = message.to_bytes();
@@ -101,8 +103,14 @@ async fn upload_file_chunked(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
-    println!("Connected to server\n");
+    // Get server address from command line or use default
+    let server_addr = env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_SERVER.to_string());
+
+    println!("Connecting to {}...", server_addr);
+    let mut stream = TcpStream::connect(&server_addr).await?;
+    println!("Connected!\n");
 
     let auth_token = generate_auth_token(SERVER_PASSWORD);
     let mut request_id = 1u32;

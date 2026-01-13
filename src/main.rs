@@ -10,6 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 // Server configuration
 const SERVER_PASSWORD: &str = "secure_password_123"; // In production, load from config file
+const BIND_ADDRESS: &str = "0.0.0.0:8080"; // Listen on all interfaces
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -20,17 +21,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let auth_token = generate_auth_token(SERVER_PASSWORD);
     println!("Server auth token configured");
 
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    println!("Server listening on 127.0.0.1:8080\n");
+    let listener = TcpListener::bind(BIND_ADDRESS).await?;
+    println!("Server listening on {}", BIND_ADDRESS);
+    println!("Access from other devices using your local IP address");
+    println!("Example: 192.168.1.x:8080\n");
 
     loop {
         let (socket, addr) = listener.accept().await?;
-        println!("New connection from: {}", addr);
+        println!("[{}] New connection", addr);
 
         let storage = Arc::clone(&storage);
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, storage, auth_token).await {
-                eprintln!("Error handling client: {}", e);
+                eprintln!("[{}] Error: {}", addr, e);
             }
         });
     }
@@ -41,6 +44,7 @@ async fn handle_client(
     storage: Arc<Storage>,
     expected_token: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
+    let peer_addr = socket.peer_addr()?;
     let mut authenticated = false;
     let mut request_counter = 0u32;
 
@@ -50,7 +54,7 @@ async fn handle_client(
         match socket.read_exact(&mut len_bytes).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                println!("Client disconnected\n");
+                println!("[{}] Client disconnected", peer_addr);
                 return Ok(());
             }
             Err(e) => return Err(e.into()),
@@ -66,7 +70,7 @@ async fn handle_client(
         let message = match Message::from_bytes(length, &data) {
             Ok(msg) => msg,
             Err(e) => {
-                eprintln!("Failed to parse message: {}", e);
+                eprintln!("[{}] Failed to parse message: {}", peer_addr, e);
                 let error_response = Message::new_response(
                     request_counter,
                     Operation::Store, // Doesn't matter which operation
@@ -111,7 +115,7 @@ async fn handle_client(
             // Handle authentication
             if message.auth_token == expected_token {
                 authenticated = true;
-                println!("✓ Client authenticated");
+                println!("[{}] ✓ Client authenticated", peer_addr);
                 Message::new_response(
                     message.request_id,
                     Operation::Auth,
@@ -119,7 +123,7 @@ async fn handle_client(
                     b"Authenticated".to_vec(),
                 )
             } else {
-                println!("✗ Authentication failed");
+                println!("[{}] ✗ Authentication failed", peer_addr);
                 Message::new_response(
                     message.request_id,
                     Operation::Auth,
