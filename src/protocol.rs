@@ -8,7 +8,10 @@ pub enum Operation {
     Retrieve = 0x02,
     Delete = 0x03,
     List = 0x04,
-    Auth = 0x05, // New: authentication
+    Auth = 0x05,
+    StoreChunk = 0x06,
+    RetrieveChunk = 0x07,
+    StoreComplete = 0x08,
 }
 
 impl Operation {
@@ -19,6 +22,9 @@ impl Operation {
             0x03 => Ok(Operation::Delete),
             0x04 => Ok(Operation::List),
             0x05 => Ok(Operation::Auth),
+            0x06 => Ok(Operation::StoreChunk),
+            0x07 => Ok(Operation::RetrieveChunk),
+            0x08 => Ok(Operation::StoreComplete),
             _ => Err(Error::new(ErrorKind::InvalidData, "Invalid operation code")),
         }
     }
@@ -213,6 +219,93 @@ pub fn generate_auth_token(password: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     hasher.finalize().into()
+}
+
+// Chunk constants
+pub const CHUNK_SIZE: usize = 65536; // 64KB
+
+// Chunk metadata helpers
+#[derive(Debug)]
+pub struct ChunkMetadata {
+    pub filename: String,
+    pub chunk_number: u32,
+    pub total_chunks: u32,
+    pub data: Vec<u8>,
+}
+
+impl ChunkMetadata {
+    /// Encode chunk metadata into payload
+    /// Format: [filename_len: u32][filename][chunk_num: u32][total_chunks: u32][data]
+    pub fn to_payload(&self) -> Vec<u8> {
+        let filename_bytes = self.filename.as_bytes();
+        let filename_len = filename_bytes.len() as u32;
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&filename_len.to_be_bytes());
+        payload.extend_from_slice(filename_bytes);
+        payload.extend_from_slice(&self.chunk_number.to_be_bytes());
+        payload.extend_from_slice(&self.total_chunks.to_be_bytes());
+        payload.extend_from_slice(&self.data);
+
+        payload
+    }
+
+    /// Decode chunk metadata from payload
+    pub fn from_payload(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 12 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Chunk payload too short",
+            ));
+        }
+
+        let mut offset = 0;
+
+        // Filename length
+        let filename_len = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if payload.len() < offset + filename_len + 8 {
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid chunk payload"));
+        }
+
+        // Filename
+        let filename = String::from_utf8_lossy(&payload[offset..offset + filename_len]).to_string();
+        offset += filename_len;
+
+        // Chunk number
+        let chunk_number = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]);
+        offset += 4;
+
+        // Total chunks
+        let total_chunks = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]);
+        offset += 4;
+
+        // Data
+        let data = payload[offset..].to_vec();
+
+        Ok(Self {
+            filename,
+            chunk_number,
+            total_chunks,
+            data,
+        })
+    }
 }
 
 #[cfg(test)]

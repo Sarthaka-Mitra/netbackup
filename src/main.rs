@@ -1,7 +1,7 @@
 mod protocol;
 mod storage;
 
-use protocol::{Message, Operation, StatusCode, generate_auth_token};
+use protocol::{ChunkMetadata, Message, Operation, StatusCode, generate_auth_token};
 use std::error::Error;
 use std::sync::Arc;
 use storage::Storage;
@@ -81,7 +81,7 @@ async fn handle_client(
         request_counter += 1;
 
         // Check authentication (except for Auth operation itself)
-        if message.operation != Operation::Auth {
+        if !matches!(message.operation, Operation::Auth) {
             if !authenticated {
                 let response = Message::new_response(
                     message.request_id,
@@ -138,6 +138,81 @@ async fn handle_client(
 
 fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
     match message.operation {
+        Operation::StoreChunk => match ChunkMetadata::from_payload(&message.payload) {
+            Ok(chunk) => {
+                match storage.store_chunk(
+                    &chunk.filename,
+                    chunk.chunk_number,
+                    chunk.total_chunks,
+                    chunk.data,
+                ) {
+                    Ok(complete) => {
+                        if complete {
+                            println!(
+                                "✓ CHUNK: {} - {}/{} (COMPLETE)",
+                                chunk.filename,
+                                chunk.chunk_number + 1,
+                                chunk.total_chunks
+                            );
+                        } else {
+                            println!(
+                                "✓ CHUNK: {} - {}/{}",
+                                chunk.filename,
+                                chunk.chunk_number + 1,
+                                chunk.total_chunks
+                            );
+                        }
+
+                        let status = if complete { "COMPLETE" } else { "OK" };
+                        Message::new_response(
+                            message.request_id,
+                            Operation::StoreChunk,
+                            StatusCode::Success,
+                            status.as_bytes().to_vec(),
+                        )
+                    }
+                    Err(_) => {
+                        eprintln!("✗ CHUNK STORE failed");
+                        Message::new_response(
+                            message.request_id,
+                            Operation::StoreChunk,
+                            StatusCode::ErrorServerError,
+                            b"Chunk storage failed".to_vec(),
+                        )
+                    }
+                }
+            }
+            Err(_) => Message::new_response(
+                message.request_id,
+                Operation::StoreChunk,
+                StatusCode::ErrorInvalidData,
+                b"Invalid chunk metadata".to_vec(),
+            ),
+        },
+        Operation::StoreComplete => {
+            let filename = String::from_utf8_lossy(&message.payload).to_string();
+
+            match storage.complete_chunked_upload(&filename) {
+                Ok(_) => {
+                    println!("✓ STORE COMPLETE: {}", filename);
+                    Message::new_response(
+                        message.request_id,
+                        Operation::StoreComplete,
+                        StatusCode::Success,
+                        b"File stored successfully".to_vec(),
+                    )
+                }
+                Err(_) => {
+                    eprintln!("✗ STORE COMPLETE failed");
+                    Message::new_response(
+                        message.request_id,
+                        Operation::StoreComplete,
+                        StatusCode::ErrorServerError,
+                        b"Failed to finalize upload".to_vec(),
+                    )
+                }
+            }
+        }
         Operation::Store => {
             // Payload format: filename + null byte + file data
             let null_pos = match message.payload.iter().position(|&b| b == 0) {
@@ -270,6 +345,15 @@ fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
                 Operation::Auth,
                 StatusCode::ErrorServerError,
                 b"Unexpected auth operation".to_vec(),
+            )
+        }
+        Operation::RetrieveChunk => {
+            // TODO: Implement chunked retrieval in next iteration
+            Message::new_response(
+                message.request_id,
+                Operation::RetrieveChunk,
+                StatusCode::ErrorServerError,
+                b"Chunked retrieval not yet implemented".to_vec(),
             )
         }
     }
