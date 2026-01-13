@@ -9,9 +9,9 @@ pub enum Operation {
     Delete = 0x03,
     List = 0x04,
     Auth = 0x05,
-    StoreChunk = 0x06,
-    RetrieveChunk = 0x07,
-    StoreComplete = 0x08,
+    StoreChunk = 0x06,    // Store a single chunk
+    RetrieveChunk = 0x07, // Retrieve a single chunk
+    StoreComplete = 0x08, // Signal all chunks sent
 }
 
 impl Operation {
@@ -64,6 +64,7 @@ pub struct Message {
 }
 
 impl Message {
+    #[allow(dead_code)]
     pub fn new(operation: Operation, payload: Vec<u8>) -> Self {
         let checksum = Self::calculate_checksum(&payload);
         Self {
@@ -76,6 +77,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_with_auth(operation: Operation, payload: Vec<u8>, auth_token: [u8; 32]) -> Self {
         let checksum = Self::calculate_checksum(&payload);
         Self {
@@ -88,6 +90,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_response(
         request_id: u32,
         operation: Operation,
@@ -105,6 +108,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_request_id(&mut self, id: u32) {
         self.request_id = id;
     }
@@ -222,6 +226,7 @@ pub fn generate_auth_token(password: &str) -> [u8; 32] {
 }
 
 // Chunk constants
+#[allow(dead_code)]
 pub const CHUNK_SIZE: usize = 65536; // 64KB
 
 // Chunk metadata helpers
@@ -236,6 +241,7 @@ pub struct ChunkMetadata {
 impl ChunkMetadata {
     /// Encode chunk metadata into payload
     /// Format: [filename_len: u32][filename][chunk_num: u32][total_chunks: u32][data]
+    #[allow(dead_code)]
     pub fn to_payload(&self) -> Vec<u8> {
         let filename_bytes = self.filename.as_bytes();
         let filename_len = filename_bytes.len() as u32;
@@ -251,6 +257,7 @@ impl ChunkMetadata {
     }
 
     /// Decode chunk metadata from payload
+    #[allow(dead_code)]
     pub fn from_payload(payload: &[u8]) -> io::Result<Self> {
         if payload.len() < 12 {
             return Err(Error::new(
