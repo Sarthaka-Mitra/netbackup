@@ -1,145 +1,271 @@
-mod protocol;
-
-use protocol::{Message, Operation, StatusCode, generate_auth_token};
+use crate::protocol::{
+    generate_auth_token, ChunkMetadata, Message, Operation, StatusCode, CHUNK_SIZE,
+};
 use std::error::Error;
+use std::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 const SERVER_PASSWORD: &str = "secure_password_123";
 
-async fn send_message(stream: &mut TcpStream, message: &Message) -> Result<(), Box<dyn Error>> {
-    let bytes = message.to_bytes();
-    stream.write_all(&bytes).await?;
-    Ok(())
+struct Client {
+    stream: TcpStream,
+    auth_token: [u8; 32],
+    request_id: u32,
 }
 
-async fn receive_message(stream: &mut TcpStream) -> Result<Message, Box<dyn Error>> {
-    // Read length prefix
-    let mut len_bytes = [0u8; 4];
-    stream.read_exact(&mut len_bytes).await?;
-    let length = u32::from_be_bytes(len_bytes);
+impl Client {
+    async fn connect(server_addr: &str) -> Result<Self, Box<dyn Error>> {
+        let stream = TcpStream::connect(server_addr).await?;
+        let auth_token = generate_auth_token(SERVER_PASSWORD);
 
-    // Read message data
-    let mut data = vec![0u8; length as usize];
-    stream.read_exact(&mut data).await?;
+        let mut client = Self {
+            stream,
+            auth_token,
+            request_id: 1,
+        };
 
-    // Parse message
-    Ok(Message::from_bytes(length, &data)?)
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
-    println!("Connected to server\n");
-
-    let auth_token = generate_auth_token(SERVER_PASSWORD);
-    let mut request_id = 1u32;
-
-    // Step 1: Authenticate
-    println!("=== Authenticating ===");
-    let mut auth_msg = Message::new_with_auth(Operation::Auth, Vec::new(), auth_token);
-    auth_msg.set_request_id(request_id);
-    request_id += 1;
-
-    send_message(&mut stream, &auth_msg).await?;
-    let response = receive_message(&mut stream).await?;
-
-    if response.status == StatusCode::Success {
-        println!("✓ Authenticated successfully\n");
-    } else {
-        println!(
-            "✗ Authentication failed: {}\n",
-            String::from_utf8_lossy(&response.payload)
-        );
-        return Ok(());
+        client.authenticate().await?;
+        Ok(client)
     }
 
-    // Step 2: Store a file
-    println!("=== Test 1: STORE ===");
-    let filename = "hello.txt";
-    let file_content = b"Hello from the client! This is test data.";
+    async fn send_message(&mut self, message: &Message) -> Result<(), Box<dyn Error>> {
+        let bytes = message.to_bytes();
+        self.stream.write_all(&bytes).await?;
+        Ok(())
+    }
 
-    let mut payload = filename.as_bytes().to_vec();
-    payload.push(0);
-    payload.extend_from_slice(file_content);
+    async fn receive_message(&mut self) -> Result<Message, Box<dyn Error>> {
+        let mut len_bytes = [0u8; 4];
+        self.stream.read_exact(&mut len_bytes).await?;
+        let length = u32::from_be_bytes(len_bytes);
 
-    let mut store_msg = Message::new_with_auth(Operation::Store, payload, auth_token);
-    store_msg.set_request_id(request_id);
-    request_id += 1;
+        let mut data = vec![0u8; length as usize];
+        self.stream.read_exact(&mut data).await?;
 
-    send_message(&mut stream, &store_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!("Status: {:?}", response.status);
-    println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
+        Ok(Message::from_bytes(length, &data)?)
+    }
 
-    // Step 3: List files
-    println!("=== Test 2: LIST ===");
-    let mut list_msg = Message::new_with_auth(Operation::List, Vec::new(), auth_token);
-    list_msg.set_request_id(request_id);
-    request_id += 1;
+    async fn authenticate(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut auth_msg = Message::new_with_auth(Operation::Auth, Vec::new(), self.auth_token);
+        auth_msg.set_request_id(self.request_id);
+        self.request_id += 1;
 
-    send_message(&mut stream, &list_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!(
-        "Files on server:\n{}\n",
-        String::from_utf8_lossy(&response.payload)
-    );
+        self.send_message(&auth_msg).await?;
+        let response = self.receive_message().await?;
 
-    // Step 4: Retrieve the file
-    println!("=== Test 3: RETRIEVE ===");
-    let mut retrieve_msg = Message::new_with_auth(
-        Operation::Retrieve,
-        filename.as_bytes().to_vec(),
-        auth_token,
-    );
-    retrieve_msg.set_request_id(request_id);
-    request_id += 1;
+        if response.status != StatusCode::Success {
+            return Err("Authentication failed".into());
+        }
 
-    send_message(&mut stream, &retrieve_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!("Status: {:?}", response.status);
-    println!(
-        "Retrieved content: {}\n",
-        String::from_utf8_lossy(&response.payload)
-    );
+        Ok(())
+    }
 
-    // Step 5: Try invalid auth (should fail)
-    println!("=== Test 4: Invalid Auth Token (should fail) ===");
-    let bad_token = [0u8; 32]; // Wrong token
-    let mut bad_msg = Message::new_with_auth(Operation::List, Vec::new(), bad_token);
-    bad_msg.set_request_id(request_id);
-    request_id += 1;
+    async fn upload_file(
+        &mut self,
+        local_path: &str,
+        remote_name: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let data = fs::read(local_path)?;
+        let total_size = data.len();
+        let total_chunks = (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-    send_message(&mut stream, &bad_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!("Status: {:?}", response.status);
-    println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
+        println!(
+            "Uploading {} as '{}' ({} bytes)",
+            local_path, remote_name, total_size
+        );
 
-    // Step 6: Delete a file
-    println!("=== Test 5: DELETE ===");
-    let mut delete_msg =
-        Message::new_with_auth(Operation::Delete, filename.as_bytes().to_vec(), auth_token);
-    delete_msg.set_request_id(request_id);
-    request_id += 1;
+        for chunk_num in 0..total_chunks {
+            let start = chunk_num * CHUNK_SIZE;
+            let end = std::cmp::min(start + CHUNK_SIZE, total_size);
+            let chunk_data = data[start..end].to_vec();
 
-    send_message(&mut stream, &delete_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!("Status: {:?}", response.status);
-    println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
+            let chunk_meta = ChunkMetadata {
+                filename: remote_name.to_string(),
+                chunk_number: chunk_num as u32,
+                total_chunks: total_chunks as u32,
+                data: chunk_data,
+            };
 
-    // Step 7: Try to retrieve deleted file
-    println!("=== Test 6: RETRIEVE deleted file (should fail) ===");
-    let mut retrieve_msg = Message::new_with_auth(
-        Operation::Retrieve,
-        filename.as_bytes().to_vec(),
-        auth_token,
-    );
-    retrieve_msg.set_request_id(request_id);
+            let mut msg = Message::new_with_auth(
+                Operation::StoreChunk,
+                chunk_meta.to_payload(),
+                self.auth_token,
+            );
+            msg.set_request_id(self.request_id);
+            self.request_id += 1;
 
-    send_message(&mut stream, &retrieve_msg).await?;
-    let response = receive_message(&mut stream).await?;
-    println!("Status: {:?}", response.status);
-    println!("Response: {}\n", String::from_utf8_lossy(&response.payload));
+            self.send_message(&msg).await?;
+            let response = self.receive_message().await?;
 
-    Ok(())
+            if response.status != StatusCode::Success {
+                return Err(format!("Chunk {} upload failed", chunk_num).into());
+            }
+
+            let progress = ((chunk_num + 1) as f64 / total_chunks as f64 * 100.0) as u32;
+            print!("\rProgress: {}%", progress);
+            std::io::Write::flush(&mut std::io::stdout())?;
+        }
+
+        println!();
+
+        let mut complete_msg = Message::new_with_auth(
+            Operation::StoreComplete,
+            remote_name.as_bytes().to_vec(),
+            self.auth_token,
+        );
+        complete_msg.set_request_id(self.request_id);
+        self.request_id += 1;
+
+        self.send_message(&complete_msg).await?;
+        let response = self.receive_message().await?;
+
+        if response.status == StatusCode::Success {
+            println!("✓ Upload complete!");
+            Ok(())
+        } else {
+            Err(format!(
+                "Upload finalization failed: {}",
+                String::from_utf8_lossy(&response.payload)
+            )
+            .into())
+        }
+    }
+
+    async fn download_file(
+        &mut self,
+        remote_name: &str,
+        local_path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut retrieve_msg = Message::new_with_auth(
+            Operation::Retrieve,
+            remote_name.as_bytes().to_vec(),
+            self.auth_token,
+        );
+        retrieve_msg.set_request_id(self.request_id);
+        self.request_id += 1;
+
+        println!("Downloading '{}'...", remote_name);
+
+        self.send_message(&retrieve_msg).await?;
+        let response = self.receive_message().await?;
+
+        if response.status != StatusCode::Success {
+            return Err(format!(
+                "Download failed: {}",
+                String::from_utf8_lossy(&response.payload)
+            )
+            .into());
+        }
+
+        fs::write(local_path, &response.payload)?;
+
+        println!(
+            "✓ Downloaded to '{}' ({} bytes)",
+            local_path,
+            response.payload.len()
+        );
+        Ok(())
+    }
+
+    async fn list_files(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut list_msg = Message::new_with_auth(Operation::List, Vec::new(), self.auth_token);
+        list_msg.set_request_id(self.request_id);
+        self.request_id += 1;
+
+        self.send_message(&list_msg).await?;
+        let response = self.receive_message().await?;
+
+        if response.status != StatusCode::Success {
+            return Err("List failed".into());
+        }
+
+        let files = String::from_utf8_lossy(&response.payload);
+        if files.trim().is_empty() {
+            println!("No files on server");
+        } else {
+            println!("Files on server:");
+            for file in files.lines() {
+                println!("  - {}", file);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn delete_file(&mut self, remote_name: &str) -> Result<(), Box<dyn Error>> {
+        let mut delete_msg = Message::new_with_auth(
+            Operation::Delete,
+            remote_name.as_bytes().to_vec(),
+            self.auth_token,
+        );
+        delete_msg.set_request_id(self.request_id);
+        self.request_id += 1;
+
+        self.send_message(&delete_msg).await?;
+        let response = self.receive_message().await?;
+
+        if response.status == StatusCode::Success {
+            println!("✓ Deleted '{}'", remote_name);
+            Ok(())
+        } else {
+            Err(format!(
+                "Delete failed: {}",
+                String::from_utf8_lossy(&response.payload)
+            )
+            .into())
+        }
+    }
+}
+
+pub async fn upload(
+    server_addr: &str,
+    local_path: &str,
+    remote_name: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    print!("Connecting to {}... ", server_addr);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut client = Client::connect(server_addr).await?;
+    println!("✓\n");
+
+    let filename = remote_name.unwrap_or_else(|| {
+        std::path::Path::new(local_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("uploaded_file")
+    });
+
+    client.upload_file(local_path, filename).await
+}
+
+pub async fn download(
+    server_addr: &str,
+    remote_name: &str,
+    local_path: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    print!("Connecting to {}... ", server_addr);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut client = Client::connect(server_addr).await?;
+    println!("✓\n");
+
+    let output_path = local_path.unwrap_or(remote_name);
+    client.download_file(remote_name, output_path).await
+}
+
+pub async fn list(server_addr: &str) -> Result<(), Box<dyn Error>> {
+    print!("Connecting to {}... ", server_addr);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut client = Client::connect(server_addr).await?;
+    println!("✓\n");
+
+    client.list_files().await
+}
+
+pub async fn delete(server_addr: &str, remote_name: &str) -> Result<(), Box<dyn Error>> {
+    print!("Connecting to {}... ", server_addr);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut client = Client::connect(server_addr).await?;
+    println!("✓\n");
+
+    client.delete_file(remote_name).await
 }

@@ -1,364 +1,107 @@
+mod client;
 mod protocol;
+mod server;
 mod storage;
 
-use protocol::{ChunkMetadata, Message, Operation, StatusCode, generate_auth_token};
-use std::error::Error;
-use std::sync::Arc;
-use storage::Storage;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use clap::{Parser, Subcommand};
 
-// Server configuration
-const SERVER_PASSWORD: &str = "secure_password_123"; // In production, load from config file
-const BIND_ADDRESS: &str = "0.0.0.0:8080"; // Listen on all interfaces
+#[derive(Parser)]
+#[command(name = "netbackup")]
+#[command(about = "Network backup and storage system", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the storage server
+    Server {
+        /// Address to bind to (default: 0.0.0.0:8080)
+        #[arg(short, long, default_value = "0.0.0.0:8080")]
+        bind: String,
+
+        /// Storage directory (default: ./storage_data)
+        #[arg(short, long, default_value = "./storage_data")]
+        storage: String,
+    },
+
+    /// Upload a file to the server
+    Upload {
+        /// Local file path
+        local_file: String,
+
+        /// Remote filename (optional)
+        remote_name: Option<String>,
+
+        /// Server address (default: 127.0.0.1:8080)
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        server: String,
+    },
+
+    /// Download a file from the server
+    Download {
+        /// Remote filename
+        remote_file: String,
+
+        /// Local path to save (optional)
+        local_path: Option<String>,
+
+        /// Server address (default: 127.0.0.1:8080)
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        server: String,
+    },
+
+    /// List all files on the server
+    List {
+        /// Server address (default: 127.0.0.1:8080)
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        server: String,
+    },
+
+    /// Delete a file from the server
+    Delete {
+        /// Remote filename
+        remote_file: String,
+
+        /// Server address (default: 127.0.0.1:8080)
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        server: String,
+    },
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize storage
-    let storage = Arc::new(Storage::new("./storage_data")?);
-    println!("Storage initialized at: ./storage_data");
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
 
-    let auth_token = generate_auth_token(SERVER_PASSWORD);
-    println!("Server auth token configured");
-
-    let listener = TcpListener::bind(BIND_ADDRESS).await?;
-    println!("Server listening on {}", BIND_ADDRESS);
-    println!("Access from other devices using your local IP address");
-    println!("Example: 192.168.1.x:8080\n");
-
-    loop {
-        let (socket, addr) = listener.accept().await?;
-        println!("[{}] New connection", addr);
-
-        let storage = Arc::clone(&storage);
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, storage, auth_token).await {
-                eprintln!("[{}] Error: {}", addr, e);
-            }
-        });
-    }
-}
-
-async fn handle_client(
-    mut socket: TcpStream,
-    storage: Arc<Storage>,
-    expected_token: [u8; 32],
-) -> Result<(), Box<dyn Error>> {
-    let peer_addr = socket.peer_addr()?;
-    let mut authenticated = false;
-    let mut request_counter = 0u32;
-
-    loop {
-        // Read length prefix (4 bytes)
-        let mut len_bytes = [0u8; 4];
-        match socket.read_exact(&mut len_bytes).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                println!("[{}] Client disconnected", peer_addr);
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
+    match cli.command {
+        Commands::Server { bind, storage } => {
+            server::run(bind, storage).await?;
         }
-
-        let length = u32::from_be_bytes(len_bytes);
-
-        // Read message data
-        let mut data = vec![0u8; length as usize];
-        socket.read_exact(&mut data).await?;
-
-        // Parse message
-        let message = match Message::from_bytes(length, &data) {
-            Ok(msg) => msg,
-            Err(e) => {
-                eprintln!("[{}] Failed to parse message: {}", peer_addr, e);
-                let error_response = Message::new_response(
-                    request_counter,
-                    Operation::Store, // Doesn't matter which operation
-                    StatusCode::ErrorInvalidData,
-                    b"Invalid message format".to_vec(),
-                );
-                socket.write_all(&error_response.to_bytes()).await?;
-                continue;
-            }
-        };
-
-        request_counter += 1;
-
-        // Check authentication (except for Auth operation itself)
-        if !matches!(message.operation, Operation::Auth) {
-            if !authenticated {
-                let response = Message::new_response(
-                    message.request_id,
-                    message.operation,
-                    StatusCode::ErrorPermissionDenied,
-                    b"Authentication required".to_vec(),
-                );
-                socket.write_all(&response.to_bytes()).await?;
-                continue;
-            }
-
-            // Verify token on every request
-            if message.auth_token != expected_token {
-                let response = Message::new_response(
-                    message.request_id,
-                    message.operation,
-                    StatusCode::ErrorPermissionDenied,
-                    b"Invalid authentication token".to_vec(),
-                );
-                socket.write_all(&response.to_bytes()).await?;
-                continue;
-            }
+        Commands::Upload {
+            local_file,
+            remote_name,
+            server,
+        } => {
+            client::upload(&server, &local_file, remote_name.as_deref()).await?;
         }
-
-        // Handle operation
-        let response = if message.operation == Operation::Auth {
-            // Handle authentication
-            if message.auth_token == expected_token {
-                authenticated = true;
-                println!("[{}] ✓ Client authenticated", peer_addr);
-                Message::new_response(
-                    message.request_id,
-                    Operation::Auth,
-                    StatusCode::Success,
-                    b"Authenticated".to_vec(),
-                )
-            } else {
-                println!("[{}] ✗ Authentication failed", peer_addr);
-                Message::new_response(
-                    message.request_id,
-                    Operation::Auth,
-                    StatusCode::ErrorPermissionDenied,
-                    b"Invalid password".to_vec(),
-                )
-            }
-        } else {
-            handle_storage_operation(message, &storage)
-        };
-
-        // Send response
-        socket.write_all(&response.to_bytes()).await?;
-    }
-}
-
-fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
-    match message.operation {
-        Operation::StoreChunk => match ChunkMetadata::from_payload(&message.payload) {
-            Ok(chunk) => {
-                match storage.store_chunk(
-                    &chunk.filename,
-                    chunk.chunk_number,
-                    chunk.total_chunks,
-                    chunk.data,
-                ) {
-                    Ok(complete) => {
-                        if complete {
-                            println!(
-                                "✓ CHUNK: {} - {}/{} (COMPLETE)",
-                                chunk.filename,
-                                chunk.chunk_number + 1,
-                                chunk.total_chunks
-                            );
-                        } else {
-                            println!(
-                                "✓ CHUNK: {} - {}/{}",
-                                chunk.filename,
-                                chunk.chunk_number + 1,
-                                chunk.total_chunks
-                            );
-                        }
-
-                        let status = if complete { "COMPLETE" } else { "OK" };
-                        Message::new_response(
-                            message.request_id,
-                            Operation::StoreChunk,
-                            StatusCode::Success,
-                            status.as_bytes().to_vec(),
-                        )
-                    }
-                    Err(_) => {
-                        eprintln!("✗ CHUNK STORE failed");
-                        Message::new_response(
-                            message.request_id,
-                            Operation::StoreChunk,
-                            StatusCode::ErrorServerError,
-                            b"Chunk storage failed".to_vec(),
-                        )
-                    }
-                }
-            }
-            Err(_) => Message::new_response(
-                message.request_id,
-                Operation::StoreChunk,
-                StatusCode::ErrorInvalidData,
-                b"Invalid chunk metadata".to_vec(),
-            ),
-        },
-        Operation::StoreComplete => {
-            let filename = String::from_utf8_lossy(&message.payload).to_string();
-
-            match storage.complete_chunked_upload(&filename) {
-                Ok(_) => {
-                    println!("✓ STORE COMPLETE: {}", filename);
-                    Message::new_response(
-                        message.request_id,
-                        Operation::StoreComplete,
-                        StatusCode::Success,
-                        b"File stored successfully".to_vec(),
-                    )
-                }
-                Err(_) => {
-                    eprintln!("✗ STORE COMPLETE failed");
-                    Message::new_response(
-                        message.request_id,
-                        Operation::StoreComplete,
-                        StatusCode::ErrorServerError,
-                        b"Failed to finalize upload".to_vec(),
-                    )
-                }
-            }
+        Commands::Download {
+            remote_file,
+            local_path,
+            server,
+        } => {
+            client::download(&server, &remote_file, local_path.as_deref()).await?;
         }
-        Operation::Store => {
-            // Payload format: filename + null byte + file data
-            let null_pos = match message.payload.iter().position(|&b| b == 0) {
-                Some(pos) => pos,
-                None => {
-                    return Message::new_response(
-                        message.request_id,
-                        Operation::Store,
-                        StatusCode::ErrorInvalidData,
-                        b"Invalid STORE payload".to_vec(),
-                    );
-                }
-            };
-
-            let filename = String::from_utf8_lossy(&message.payload[..null_pos]).to_string();
-            let file_data = &message.payload[null_pos + 1..];
-
-            match storage.store(&filename, file_data) {
-                Ok(_) => {
-                    println!("✓ STORE: {} ({} bytes)", filename, file_data.len());
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Store,
-                        StatusCode::Success,
-                        b"OK".to_vec(),
-                    )
-                }
-                Err(_) => {
-                    eprintln!("✗ STORE failed");
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Store,
-                        StatusCode::ErrorServerError,
-                        b"Storage failed".to_vec(),
-                    )
-                }
-            }
+        Commands::List { server } => {
+            client::list(&server).await?;
         }
-        Operation::Retrieve => {
-            let filename = String::from_utf8_lossy(&message.payload).to_string();
-
-            match storage.retrieve(&filename) {
-                Ok(data) => {
-                    println!("✓ RETRIEVE: {} ({} bytes)", filename, data.len());
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Retrieve,
-                        StatusCode::Success,
-                        data,
-                    )
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    eprintln!("✗ RETRIEVE failed: File not found");
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Retrieve,
-                        StatusCode::ErrorNotFound,
-                        b"File not found".to_vec(),
-                    )
-                }
-                Err(_) => {
-                    eprintln!("✗ RETRIEVE failed");
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Retrieve,
-                        StatusCode::ErrorServerError,
-                        b"Retrieval failed".to_vec(),
-                    )
-                }
-            }
-        }
-        Operation::Delete => {
-            let filename = String::from_utf8_lossy(&message.payload).to_string();
-
-            match storage.delete(&filename) {
-                Ok(_) => {
-                    println!("✓ DELETE: {}", filename);
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Delete,
-                        StatusCode::Success,
-                        b"OK".to_vec(),
-                    )
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    eprintln!("✗ DELETE failed: File not found");
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Delete,
-                        StatusCode::ErrorNotFound,
-                        b"File not found".to_vec(),
-                    )
-                }
-                Err(_) => {
-                    eprintln!("✗ DELETE failed");
-                    Message::new_response(
-                        message.request_id,
-                        Operation::Delete,
-                        StatusCode::ErrorServerError,
-                        b"Deletion failed".to_vec(),
-                    )
-                }
-            }
-        }
-        Operation::List => match storage.list() {
-            Ok(files) => {
-                let file_list = files.join("\n");
-                println!("✓ LIST: {} files", files.len());
-                Message::new_response(
-                    message.request_id,
-                    Operation::List,
-                    StatusCode::Success,
-                    file_list.into_bytes(),
-                )
-            }
-            Err(_) => {
-                eprintln!("✗ LIST failed");
-                Message::new_response(
-                    message.request_id,
-                    Operation::List,
-                    StatusCode::ErrorServerError,
-                    b"List failed".to_vec(),
-                )
-            }
-        },
-        Operation::Auth => {
-            // Should not reach here as auth is handled separately
-            Message::new_response(
-                message.request_id,
-                Operation::Auth,
-                StatusCode::ErrorServerError,
-                b"Unexpected auth operation".to_vec(),
-            )
-        }
-        Operation::RetrieveChunk => {
-            // TODO: Implement chunked retrieval in next iteration
-            Message::new_response(
-                message.request_id,
-                Operation::RetrieveChunk,
-                StatusCode::ErrorServerError,
-                b"Chunked retrieval not yet implemented".to_vec(),
-            )
+        Commands::Delete {
+            remote_file,
+            server,
+        } => {
+            client::delete(&server, &remote_file).await?;
         }
     }
+
+    Ok(())
 }
