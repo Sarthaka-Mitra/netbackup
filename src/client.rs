@@ -6,8 +6,6 @@ use std::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const SERVER_PASSWORD: &str = "secure_password_123";
-
 struct Client {
     stream: TcpStream,
     auth_token: [u8; 32],
@@ -15,9 +13,9 @@ struct Client {
 }
 
 impl Client {
-    async fn connect(server_addr: &str) -> Result<Self, Box<dyn Error>> {
+    async fn connect(server_addr: &str, password: &str) -> Result<Self, Box<dyn Error>> {
         let stream = TcpStream::connect(server_addr).await?;
-        let auth_token = generate_auth_token(SERVER_PASSWORD);
+        let auth_token = generate_auth_token(password); // Use parameter
 
         let mut client = Self {
             stream,
@@ -222,10 +220,11 @@ pub async fn upload(
     server_addr: &str,
     local_path: &str,
     remote_name: Option<&str>,
+    password: &str, // NEW PARAMETER
 ) -> Result<(), Box<dyn Error>> {
-    print!("Connecting to {}... ", server_addr);
+    print!("Connecting to {}...  ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr).await?;
+    let mut client = Client::connect(server_addr, password).await?; // Pass password
     println!("✓\n");
 
     let filename = remote_name.unwrap_or_else(|| {
@@ -242,29 +241,36 @@ pub async fn download(
     server_addr: &str,
     remote_name: &str,
     local_path: Option<&str>,
+    password: &str, // NEW PARAMETER
 ) -> Result<(), Box<dyn Error>> {
     print!("Connecting to {}... ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr).await?;
+    let mut client = Client::connect(server_addr, password).await?; // Pass password
     println!("✓\n");
 
     let output_path = local_path.unwrap_or(remote_name);
     client.download_file(remote_name, output_path).await
 }
 
-pub async fn list(server_addr: &str) -> Result<(), Box<dyn Error>> {
+pub async fn list(server_addr: &str, password: &str) -> Result<(), Box<dyn Error>> {
+    // NEW PARAMETER
     print!("Connecting to {}... ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr).await?;
+    let mut client = Client::connect(server_addr, password).await?; // Pass password
     println!("✓\n");
 
     client.list_files().await
 }
 
-pub async fn delete(server_addr: &str, remote_name: &str) -> Result<(), Box<dyn Error>> {
+pub async fn delete(
+    server_addr: &str,
+    remote_name: &str,
+    password: &str,
+) -> Result<(), Box<dyn Error>> {
+    // NEW PARAMETER
     print!("Connecting to {}... ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr).await?;
+    let mut client = Client::connect(server_addr, password).await?; // Pass password
     println!("✓\n");
 
     client.delete_file(remote_name).await

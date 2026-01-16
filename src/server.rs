@@ -5,13 +5,16 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-const SERVER_PASSWORD: &str = "secure_password_123";
-
-pub async fn run(bind_addr: String, storage_path: String) -> Result<(), Box<dyn Error>> {
+pub async fn run(
+    bind_addr: String,
+    storage_path: String,
+    password: String,
+) -> Result<(), Box<dyn Error>> {
     let storage = Arc::new(Storage::new(&storage_path)?);
     println!("Storage initialized at: {}", storage_path);
 
-    let auth_token = generate_auth_token(SERVER_PASSWORD);
+    // CHANGE: Use password parameter instead of SERVER_PASSWORD
+    let auth_token = generate_auth_token(&password);
     println!("Server auth token configured");
 
     let listener = TcpListener::bind(&bind_addr).await?;
@@ -25,7 +28,7 @@ pub async fn run(bind_addr: String, storage_path: String) -> Result<(), Box<dyn 
         let storage = Arc::clone(&storage);
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, storage, auth_token).await {
-                eprintln!("[{}] Error: {}", addr, e);
+                eprintln!("[{}] Error:  {}", addr, e);
             }
         });
     }

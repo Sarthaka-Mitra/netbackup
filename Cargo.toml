@@ -1,9 +1,13 @@
 [package]
 name = "netbackup"
-version = "0.1.5"
+version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }  # For serialization
+toml = "0.8"                                       # For parsing TOML
+directories = "5"                                  # For finding config paths
+crossterm = { version = "0.28", features = ["event-stream"] }       # For handling raw mode in command-line
