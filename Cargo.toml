@@ -8,6 +8,8 @@ tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }  # For serialization
-toml = "0.8"                                       # For parsing TOML
+toml = "0.8"# For parsing TOML
+bincode = "1"
+chrono = "0.4"
 directories = "5"                                  # For finding config paths
 crossterm = { version = "0.28", features = ["event-stream"] }       # For handling raw mode in command-line

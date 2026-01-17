@@ -308,13 +308,13 @@ fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
         }
         Operation::List => match storage.list() {
             Ok(files) => {
-                let file_list = files.join("\n");
+                let payload = bincode::serialize(&files).unwrap(); // Or serde_json
                 println!("✓ LIST: {} files", files.len());
                 Message::new_response(
                     message.request_id,
                     Operation::List,
                     StatusCode::Success,
-                    file_list.into_bytes(),
+                    payload,
                 )
             }
             Err(_) => {

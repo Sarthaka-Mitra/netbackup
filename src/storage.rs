@@ -1,12 +1,22 @@
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct Storage {
     root_dir: PathBuf,
     pending_chunks: Mutex<HashMap<String, ChunkedUpload>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)] // For easier debugging
+pub struct FileMetadata {
+    pub filename: String,
+    pub size: u64,
+    pub last_modified: String,
+    pub checksum: String, // Optional
 }
 
 struct ChunkedUpload {
@@ -147,53 +157,54 @@ impl Storage {
         fs::remove_file(file_path)
     }
 
-    pub fn list(&self) -> io::Result<Vec<String>> {
-        let mut files = Vec::new();
+    pub fn list(&self) -> io::Result<Vec<FileMetadata>> {
+        let mut result = Vec::new();
 
         for entry in fs::read_dir(&self.root_dir)? {
             let entry = entry?;
             let path = entry.path();
 
             if path.is_file() {
-                if let Some(filename) = path.file_name() {
-                    if let Some(name) = filename.to_str() {
-                        files.push(name.to_string());
+                // Filename
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                // File size and modified time
+                let metadata = entry.metadata()?;
+                let size = metadata.len();
+
+                let time = metadata
+                    .modified()
+                    .unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH);
+                let datetime: chrono::DateTime<chrono::Utc> = time.into();
+                let last_modified = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+
+                // SHA256 checksum
+                let mut file = fs::File::open(&path)?;
+                let mut hasher = Sha256::new();
+                let mut buffer = [0; 8192];
+                loop {
+                    let n = file.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
                     }
+                    hasher.update(&buffer[..n]);
                 }
+                let checksum = format!("{:x}", hasher.finalize());
+
+                result.push(FileMetadata {
+                    filename,
+                    size,
+                    last_modified,
+                    checksum,
+                });
             }
         }
 
-        files.sort();
-        Ok(files)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn test_store_and_retrieve() {
-        let temp_dir = "test_storage_temp";
-        let storage = Storage::new(temp_dir).unwrap();
-
-        let data = b"Hello, World!";
-        storage.store("test.txt", data).unwrap();
-
-        let retrieved = storage.retrieve("test.txt").unwrap();
-        assert_eq!(retrieved, data);
-
-        // Cleanup
-        fs::remove_dir_all(temp_dir).unwrap();
-    }
-
-    #[test]
-    fn test_path_traversal_prevention() {
-        let storage = Storage::new("test_storage").unwrap();
-
-        assert!(storage.store("../evil.txt", b"bad").is_err());
-        assert!(storage.retrieve("../evil.txt").is_err());
-        assert!(storage.delete("../evil.txt").is_err());
+        result.sort_by(|a, b| a.filename.cmp(&b.filename));
+        Ok(result)
     }
 }

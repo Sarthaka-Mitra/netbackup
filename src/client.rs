@@ -178,13 +178,22 @@ impl Client {
             return Err("List failed".into());
         }
 
-        let files = String::from_utf8_lossy(&response.payload);
-        if files.trim().is_empty() {
+        let files: Vec<crate::storage::FileMetadata> = bincode::deserialize(&response.payload)?;
+        if files.is_empty() {
             println!("No files on server");
         } else {
-            println!("Files on server:");
-            for file in files.lines() {
-                println!("  - {}", file);
+            println!(
+                "{:<35} {:>10} {:<26} {:<16}",
+                "FILENAME", "SIZE", "LAST MODIFIED", "CHECKSUM"
+            );
+            for file in files {
+                println!(
+                    "{:<35} {:>10} {:<26} {:<16}",
+                    file.filename,
+                    file.size,
+                    file.last_modified,
+                    &file.checksum[..16] // Short checksum for readability
+                );
             }
         }
 
