@@ -11,5 +11,6 @@ serde = { version = "1", features = ["derive"] }  # For serialization
 toml = "0.8"# For parsing TOML
 bincode = "1"
 chrono = "0.4"
+indicatif = "0.17"
 directories = "5"                                  # For finding config paths
 crossterm = { version = "0.28", features = ["event-stream"] }       # For handling raw mode in command-line

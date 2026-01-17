@@ -1,12 +1,16 @@
 use crate::protocol::{
-    generate_auth_token, ChunkMetadata, Message, Operation, StatusCode, CHUNK_SIZE,
+    generate_auth_token, ChunkDownloadRequest, ChunkDownloadResponse, ChunkMetadata, Message,
+    Operation, StatusCode, CHUNK_SIZE,
 };
+use indicatif::ProgressBar;
 use std::error::Error;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-struct Client {
+pub struct Client {
     stream: TcpStream,
     auth_token: [u8; 32],
     request_id: u32,
@@ -55,7 +59,6 @@ impl Client {
         if response.status != StatusCode::Success {
             return Err("Authentication failed".into());
         }
-
         Ok(())
     }
 
@@ -68,10 +71,8 @@ impl Client {
         let total_size = data.len();
         let total_chunks = (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-        println!(
-            "Uploading {} as '{}' ({} bytes)",
-            local_path, remote_name, total_size
-        );
+        let pb = ProgressBar::new(total_chunks as u64);
+        pb.set_message("Uploading");
 
         for chunk_num in 0..total_chunks {
             let start = chunk_num * CHUNK_SIZE;
@@ -97,14 +98,13 @@ impl Client {
             let response = self.receive_message().await?;
 
             if response.status != StatusCode::Success {
+                pb.abandon();
                 return Err(format!("Chunk {} upload failed", chunk_num).into());
             }
-
-            let progress = ((chunk_num + 1) as f64 / total_chunks as f64 * 100.0) as u32;
-            print!("\rProgress: {}%", progress);
-            std::io::Write::flush(&mut std::io::stdout())?;
+            pb.inc(1);
         }
 
+        pb.finish_with_message("Upload complete!");
         println!();
 
         let mut complete_msg = Message::new_with_auth(
@@ -119,7 +119,6 @@ impl Client {
         let response = self.receive_message().await?;
 
         if response.status == StatusCode::Success {
-            println!("✓ Upload complete!");
             Ok(())
         } else {
             Err(format!(
@@ -130,39 +129,85 @@ impl Client {
         }
     }
 
-    async fn download_file(
+    async fn get_file_metadata(
+        &mut self,
+        remote_name: &str,
+    ) -> Result<crate::storage::FileMetadata, Box<dyn Error>> {
+        let files = self.list_files_and_return().await?;
+        files
+            .into_iter()
+            .find(|f| f.filename == remote_name)
+            .ok_or_else(|| format!("File {} not found on server", remote_name).into())
+    }
+
+    async fn list_files_and_return(
+        &mut self,
+    ) -> Result<Vec<crate::storage::FileMetadata>, Box<dyn Error>> {
+        let mut list_msg = Message::new_with_auth(Operation::List, Vec::new(), self.auth_token);
+        list_msg.set_request_id(self.request_id);
+        self.request_id += 1;
+
+        self.send_message(&list_msg).await?;
+        let response = self.receive_message().await?;
+        if response.status != StatusCode::Success {
+            return Err("List failed".into());
+        }
+        let files: Vec<crate::storage::FileMetadata> = bincode::deserialize(&response.payload)?;
+        Ok(files)
+    }
+
+    async fn download_file_chunked(
         &mut self,
         remote_name: &str,
         local_path: &str,
     ) -> Result<(), Box<dyn Error>> {
-        let mut retrieve_msg = Message::new_with_auth(
-            Operation::Retrieve,
-            remote_name.as_bytes().to_vec(),
-            self.auth_token,
-        );
-        retrieve_msg.set_request_id(self.request_id);
-        self.request_id += 1;
+        let file_meta = self.get_file_metadata(remote_name).await?;
+        let total_size = file_meta.size as usize;
+        let total_chunks = (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-        println!("Downloading '{}'...", remote_name);
+        let pb = ProgressBar::new(total_chunks as u64);
+        pb.set_message("Downloading");
 
-        self.send_message(&retrieve_msg).await?;
-        let response = self.receive_message().await?;
+        let mut output = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(local_path)?;
 
-        if response.status != StatusCode::Success {
-            return Err(format!(
-                "Download failed: {}",
-                String::from_utf8_lossy(&response.payload)
-            )
-            .into());
+        for chunk_num in 0..total_chunks {
+            let chunk_req = ChunkDownloadRequest {
+                filename: remote_name.to_string(),
+                chunk_number: chunk_num as u32,
+                chunk_size: CHUNK_SIZE as u32,
+            };
+            let mut msg = Message::new_with_auth(
+                Operation::RetrieveChunk,
+                chunk_req.to_payload(),
+                self.auth_token,
+            );
+            msg.set_request_id(self.request_id);
+            self.request_id += 1;
+
+            self.send_message(&msg).await?;
+            let response = self.receive_message().await?;
+
+            if response.status != StatusCode::Success {
+                pb.abandon();
+                return Err(format!(
+                    "Chunk {} download failed: {}",
+                    chunk_num,
+                    String::from_utf8_lossy(&response.payload)
+                )
+                .into());
+            }
+
+            let chunk_resp = ChunkDownloadResponse::from_payload(&response.payload)?;
+            output.seek(SeekFrom::Start(chunk_num as u64 * CHUNK_SIZE as u64))?;
+            output.write_all(&chunk_resp.data)?;
+            pb.inc(1);
         }
-
-        fs::write(local_path, &response.payload)?;
-
-        println!(
-            "✓ Downloaded to '{}' ({} bytes)",
-            local_path,
-            response.payload.len()
-        );
+        pb.finish_with_message("Downloaded successfully!");
+        println!();
         Ok(())
     }
 
@@ -196,7 +241,6 @@ impl Client {
                 );
             }
         }
-
         Ok(())
     }
 
@@ -224,6 +268,8 @@ impl Client {
         }
     }
 }
+
+// PUBLIC API
 
 pub async fn upload(
     server_addr: &str,
@@ -254,18 +300,18 @@ pub async fn download(
 ) -> Result<(), Box<dyn Error>> {
     print!("Connecting to {}... ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr, password).await?; // Pass password
+    let mut client = Client::connect(server_addr, password).await?;
     println!("✓\n");
 
     let output_path = local_path.unwrap_or(remote_name);
-    client.download_file(remote_name, output_path).await
+    client.download_file_chunked(remote_name, output_path).await
 }
 
+// List and delete leave unchanged
 pub async fn list(server_addr: &str, password: &str) -> Result<(), Box<dyn Error>> {
-    // NEW PARAMETER
     print!("Connecting to {}... ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr, password).await?; // Pass password
+    let mut client = Client::connect(server_addr, password).await?;
     println!("✓\n");
 
     client.list_files().await
@@ -276,10 +322,9 @@ pub async fn delete(
     remote_name: &str,
     password: &str,
 ) -> Result<(), Box<dyn Error>> {
-    // NEW PARAMETER
     print!("Connecting to {}... ", server_addr);
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut client = Client::connect(server_addr, password).await?; // Pass password
+    let mut client = Client::connect(server_addr, password).await?;
     println!("✓\n");
 
     client.delete_file(remote_name).await

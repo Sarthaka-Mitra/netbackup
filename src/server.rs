@@ -1,4 +1,5 @@
 use crate::protocol::{generate_auth_token, ChunkMetadata, Message, Operation, StatusCode};
+use crate::protocol::{ChunkDownloadRequest, ChunkDownloadResponse};
 use crate::storage::Storage;
 use std::error::Error;
 use std::sync::Arc;
@@ -273,6 +274,60 @@ fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
                 }
             }
         }
+        Operation::RetrieveChunk => {
+            match ChunkDownloadRequest::from_payload(&message.payload) {
+                Ok(req) => {
+                    // file size
+                    use std::fs;
+                    let file_path = storage.root_dir().join(&req.filename);
+                    let meta = match fs::metadata(&file_path) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            return Message::new_response(
+                                message.request_id,
+                                Operation::RetrieveChunk,
+                                StatusCode::ErrorNotFound,
+                                format!("File not found: {}", e).into_bytes(),
+                            )
+                        }
+                    };
+                    let total_size = meta.len() as usize;
+                    let chunk_size = req.chunk_size as usize;
+                    let total_chunks = ((total_size + chunk_size - 1) / chunk_size) as u32;
+
+                    let chunk_data =
+                        match storage.retrieve_chunk(&req.filename, req.chunk_number, chunk_size) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                return Message::new_response(
+                                    message.request_id,
+                                    Operation::RetrieveChunk,
+                                    StatusCode::ErrorNotFound,
+                                    format!("Chunk read error: {}", e).into_bytes(),
+                                )
+                            }
+                        };
+                    let response = ChunkDownloadResponse {
+                        chunk_number: req.chunk_number,
+                        total_chunks,
+                        bytes_in_chunk: chunk_data.len() as u32,
+                        data: chunk_data,
+                    };
+                    Message::new_response(
+                        message.request_id,
+                        Operation::RetrieveChunk,
+                        StatusCode::Success,
+                        response.to_payload(),
+                    )
+                }
+                Err(e) => Message::new_response(
+                    message.request_id,
+                    Operation::RetrieveChunk,
+                    StatusCode::ErrorInvalidData,
+                    format!("Malformed chunk download request: {e}").into_bytes(),
+                ),
+            }
+        }
         Operation::Delete => {
             let filename = String::from_utf8_lossy(&message.payload).to_string();
 
@@ -332,12 +387,6 @@ fn handle_storage_operation(message: Message, storage: &Storage) -> Message {
             Operation::Auth,
             StatusCode::ErrorServerError,
             b"Unexpected auth operation".to_vec(),
-        ),
-        Operation::RetrieveChunk => Message::new_response(
-            message.request_id,
-            Operation::RetrieveChunk,
-            StatusCode::ErrorServerError,
-            b"Chunked retrieval not yet implemented".to_vec(),
         ),
     }
 }

@@ -314,7 +314,98 @@ impl ChunkMetadata {
         })
     }
 }
+#[derive(Debug)]
+pub struct ChunkDownloadRequest {
+    pub filename: String,
+    pub chunk_number: u32,
+    pub chunk_size: u32,
+}
 
+impl ChunkDownloadRequest {
+    pub fn to_payload(&self) -> Vec<u8> {
+        let filename_bytes = self.filename.as_bytes();
+        let filename_len = filename_bytes.len() as u32;
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&filename_len.to_be_bytes());
+        payload.extend_from_slice(filename_bytes);
+        payload.extend_from_slice(&self.chunk_number.to_be_bytes());
+        payload.extend_from_slice(&self.chunk_size.to_be_bytes());
+        payload
+    }
+
+    pub fn from_payload(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 12 {
+            return Err(Error::new(ErrorKind::InvalidData, "Payload too short"));
+        }
+        let mut offset = 0;
+        let filename_len = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if payload.len() < offset + filename_len + 8 {
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid payload"));
+        }
+        let filename = String::from_utf8_lossy(&payload[offset..offset + filename_len]).to_string();
+        offset += filename_len;
+        let chunk_number = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]);
+        offset += 4;
+        let chunk_size = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]);
+        Ok(Self {
+            filename,
+            chunk_number,
+            chunk_size,
+        })
+    }
+}
+
+/// Download chunk response
+#[derive(Debug)]
+pub struct ChunkDownloadResponse {
+    pub chunk_number: u32,
+    pub total_chunks: u32,
+    pub bytes_in_chunk: u32,
+    pub data: Vec<u8>,
+}
+
+impl ChunkDownloadResponse {
+    pub fn to_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(12 + self.data.len());
+        payload.extend_from_slice(&self.chunk_number.to_be_bytes());
+        payload.extend_from_slice(&self.total_chunks.to_be_bytes());
+        payload.extend_from_slice(&self.bytes_in_chunk.to_be_bytes());
+        payload.extend_from_slice(&self.data);
+        payload
+    }
+    pub fn from_payload(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 12 {
+            return Err(Error::new(ErrorKind::InvalidData, "Payload too short"));
+        }
+        let chunk_number = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let total_chunks = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        let bytes_in_chunk = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
+        let data = payload[12..].to_vec();
+        Ok(Self {
+            chunk_number,
+            total_chunks,
+            bytes_in_chunk,
+            data,
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

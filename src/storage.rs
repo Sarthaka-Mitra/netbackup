@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::File;
 use std::io::{self, Error, ErrorKind, Read};
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -74,6 +76,10 @@ impl Storage {
             root_dir: root,
             pending_chunks: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn root_dir(&self) -> &std::path::PathBuf {
+        &self.root_dir
     }
 
     pub fn store_chunk(
@@ -206,5 +212,24 @@ impl Storage {
 
         result.sort_by(|a, b| a.filename.cmp(&b.filename));
         Ok(result)
+    }
+
+    pub fn retrieve_chunk(
+        &self,
+        filename: &str,
+        chunk_number: u32,
+        chunk_size: usize,
+    ) -> io::Result<Vec<u8>> {
+        if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+            return Err(Error::new(ErrorKind::InvalidInput, "Invalid filename"));
+        }
+        let file_path = self.root_dir.join(filename);
+        let mut file = File::open(&file_path)?;
+        let offset = (chunk_number as u64) * (chunk_size as u64);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; chunk_size];
+        let n = file.read(&mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
     }
 }
