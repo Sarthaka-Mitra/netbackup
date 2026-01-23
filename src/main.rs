@@ -167,6 +167,16 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
     },
+    /// Connect to server in interactive mode
+    Connect {
+        /// Server address (overrides config file)
+        #[arg(short, long)]
+        server: Option<String>,
+
+        /// Password (will prompt if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
+    },
 
     /// Generate a default configuration file
     InitConfig {
@@ -238,6 +248,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server_addr = server.unwrap_or(config.client.default_server);
             let pass = get_password(password);
             client::delete(&server_addr, &remote_file, &pass).await?;
+        }
+        Commands::Connect { server, password } => {
+            let server_addr = server.unwrap_or(config.client.default_server);
+            let pass = get_password(password);
+            client::interactive_session(&server_addr, &pass).await?;
         }
 
         Commands::InitConfig { output } => {

@@ -329,3 +329,126 @@ pub async fn delete(
 
     client.delete_file(remote_name).await
 }
+
+pub async fn interactive_session(
+    server_addr: &str,
+    password: &str,
+) -> Result<(), Box<dyn Error>> {
+    print!("Connecting to {}... ", server_addr);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut client = Client::connect(server_addr, password).await?;
+    println!("✓\n");
+    println!("Connected to {}. Type 'help' for commands or 'exit' to quit.\n", server_addr);
+    loop {
+        print!("netbackup> ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let command = parts[0];
+        match command {
+            "exit" | "quit" => {
+                println!("Disconnecting...");
+                break;
+            }
+            "help" => {
+                println!("Available commands:");
+                println!("  upload <local_file> [remote_name]  - Upload a file");
+                println!("  download <remote_file> [local_path] - Download a file");
+                println!("  list                                - List all files");
+                println!("  llist [directory]                   - List local files (current dir if not specified)");
+                println!("  delete <remote_file>                - Delete a file");
+                println!("  help                                - Show this help");
+                println!("  exit                                - Disconnect and quit");
+            }
+            "list" => {
+                if let Err(e) = client.list_files().await {
+                    eprintln!("Error: {}", e);
+                }
+            }
+            "llist" => {
+                let dir_path = parts.get(1).copied().unwrap_or(".");
+                match std::fs::read_dir(dir_path) {
+                    Ok(entries) => {
+                        let mut files: Vec<_> = entries
+                            .filter_map(|e| e.ok())
+                            .collect();
+                        files.sort_by_key(|e| e.file_name());
+
+                        println!("{:<40} {:>12} {}", "NAME", "SIZE", "TYPE");
+                        for entry in files {
+                            let metadata = entry.metadata().ok();
+                            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                            let file_type = if metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+                                "DIR"
+                            } else {
+                                "FILE"
+                            };
+                            println!(
+                                "{:<40} {:>12} {}",
+                                entry.file_name().to_string_lossy(),
+                                if file_type == "DIR" { "-".to_string() } else { size.to_string() },
+                                file_type
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error listing local directory: {}", e);
+                    }
+                }
+            }
+            "upload" => {
+                if parts.len() < 2 {
+                    eprintln!("Usage: upload <local_file> [remote_name]");
+                    continue;
+                }
+                let local_file = parts[1];
+                let remote_name = parts.get(2).copied();
+                
+                let filename = remote_name.unwrap_or_else(|| {
+                    std::path::Path::new(local_file)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("uploaded_file")
+                });
+                if let Err(e) = client.upload_file(local_file, filename).await {
+                    eprintln!("Error: {}", e);
+                } else {
+                    println!("✓ Uploaded '{}' as '{}'", local_file, filename);
+                }
+            }
+            "download" => {
+                if parts.len() < 2 {
+                    eprintln!("Usage: download <remote_file> [local_path]");
+                    continue;
+                }
+                let remote_file = parts[1];
+                let local_path = parts.get(2).copied().unwrap_or(remote_file);
+                if let Err(e) = client.download_file_chunked(remote_file, local_path).await {
+                    eprintln!("Error: {}", e);
+                } else {
+                    println!("✓ Downloaded '{}' to '{}'", remote_file, local_path);
+                }
+            }
+            "delete" => {
+                if parts.len() < 2 {
+                    eprintln!("Usage: delete <remote_file>");
+                    continue;
+                }
+                let remote_file = parts[1];
+                if let Err(e) = client.delete_file(remote_file).await {
+                    eprintln!("Error: {}", e);
+                }
+            }
+            _ => {
+                eprintln!("Unknown command: '{}'. Type 'help' for available commands.", command);
+            }
+        }
+        println!(); // Add spacing between commands
+    }
+    Ok(())
+}
