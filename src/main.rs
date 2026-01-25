@@ -100,87 +100,71 @@ struct Cli {
 enum Commands {
     /// Start the storage server
     Server {
-        /// Address to bind to (overrides config file)
+        /// Address to bind to (overrides config) [default: from config]
         #[arg(short, long)]
         bind: Option<String>,
-
-        /// Storage directory (overrides config file)
+        /// Storage directory path (overrides config) [default: from config]
         #[arg(short, long)]
         storage: Option<String>,
     },
-
     /// Upload a file to the server
     Upload {
-        /// Local file path
+        /// <local_file> - Path to the local file to upload
         local_file: String,
-
-        /// Remote filename (optional)
+        /// [remote_name] - Optional remote filename (defaults to local filename)
         remote_name: Option<String>,
-
-        /// Server address (overrides config file)
+        /// Server address (overrides config) [default: from config]
         #[arg(short, long)]
         server: Option<String>,
-
-        /// Password (will prompt if not provided)
+        /// Password for authentication (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
     },
-
     /// Download a file from the server
     Download {
-        /// Remote filename
+        /// <remote_file> - Filename on the remote server
         remote_file: String,
-
-        /// Local path to save (optional)
+        /// [local_path] - Optional local path to save (defaults to remote filename)
         local_path: Option<String>,
-
-        /// Server address (overrides config file)
+        /// Server address (overrides config) [default: from config]
         #[arg(short, long)]
         server: Option<String>,
-
-        /// Password (will prompt if not provided)
+        /// Password for authentication (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
     },
-
     /// List all files on the server
     List {
-        /// Server address (overrides config file)
+        /// Server address (overrides config) [default: from config]
         #[arg(short, long)]
         server: Option<String>,
-
-        /// Password (will prompt if not provided)
+        /// Password for authentication (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
     },
-
     /// Delete a file from the server
     Delete {
-        /// Remote filename
+        /// <remote_file> - Filename to delete from server
         remote_file: String,
-
-        /// Server address (overrides config file)
+        /// Server address (overrides config) [default: from config]
         #[arg(short, long)]
         server: Option<String>,
-
-        /// Password (will prompt if not provided)
+        /// Password for authentication (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
     },
     /// Connect to server in interactive mode
     Connect {
-        /// Server address (overrides config file)
+        /// Server address (overrides config) [default: from config]
         #[arg(short, long)]
         server: Option<String>,
-
-        /// Password (will prompt if not provided)
+        /// Password for authentication (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
     },
-
     /// Generate a default configuration file
     InitConfig {
-        /// Path to write config file (defaults to ./netbackup.toml)
+        /// [output] - Path to write config file [default: ./netbackup.toml]
         #[arg(short, long)]
         output: Option<PathBuf>,
     },

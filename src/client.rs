@@ -357,13 +357,17 @@ pub async fn interactive_session(
             }
             "help" => {
                 println!("Available commands:");
-                println!("  upload <local_file> [remote_name]  - Upload a file");
-                println!("  download <remote_file> [local_path] - Download a file");
-                println!("  list                                - List all files");
-                println!("  llist [directory]                   - List local files (current dir if not specified)");
-                println!("  delete <remote_file>                - Delete a file");
-                println!("  help                                - Show this help");
-                println!("  exit                                - Disconnect and quit");
+                println!("  upload <local_file> [remote_name]   - Upload a file to server");
+                println!("  download <remote_file> [local_path] - Download a file from server");
+                println!("  list                                - List files on remote server");
+                println!("  llist [directory]                   - List local files (defaults to current directory)");
+                println!("  delete <remote_file>                - Delete a file from server");
+                println!("  help                                - Show this help message");
+                println!("  exit | quit                         - Disconnect and quit session");
+                println!();
+                println!("Syntax:");
+                println!("  <argument>  - Required argument");
+                println!("  [argument]  - Optional argument");
             }
             "list" => {
                 if let Err(e) = client.list_files().await {
