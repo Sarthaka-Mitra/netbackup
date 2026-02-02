@@ -1,4 +1,4 @@
-# NetBackup
+# Netbackup
 
 A network-based file storage server written in Rust. NetBackup provides a private file storage solution accessible over your local network using a custom binary protocol with SHA-256 authentication and integrity verification.
 
